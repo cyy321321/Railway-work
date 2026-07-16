@@ -1,0 +1,384 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <title>軌道幾何線形與工作點 (WP) 分步建構示意</title>
+    <style>
+        body { font-family: "Helvetica Neue", Arial, "Microsoft JhengHei", sans-serif; background-color: #e9ecef; padding: 20px; text-align: center; color: #212529; }
+        .container { background: #ffffff; padding: 25px; border-radius: 4px; max-width: 900px; margin: 0 auto; box-shadow: 0 4px 6px rgba(0,0,0,0.05); border: 1px solid #ced4da; }
+        
+        .phase-indicator { display: flex; justify-content: center; gap: 10px; margin-bottom: 20px; }
+        .phase-box { padding: 8px 16px; background-color: #f8f9fa; color: #6c757d; font-weight: bold; font-size: 13px; border: 1px solid #dee2e6; letter-spacing: 0.5px; }
+        .phase-box.active { background-color: #17375e; color: #ffffff; border-color: #17375e; }
+        
+        .controls { margin-bottom: 15px; display: flex; justify-content: center; gap: 8px; }
+        button { padding: 6px 14px; font-size: 13px; cursor: pointer; border: 1px solid #17375e; background: white; color: #17375e; font-weight: bold; }
+        button:hover { background: #17375e; color: white; }
+        
+        .slider-group { margin: 15px 0; display: flex; align-items: center; justify-content: center; gap: 12px; font-weight: bold; flex-direction: column; }
+        input[type=range] { width: 450px; cursor: pointer; accent-color: #17375e; }
+        
+        canvas { border: 1px solid #adb5bd; background-color: #ffffff; margin-top: 10px; display: block; margin-left: auto; margin-right: auto; }
+        
+        .info-box { margin-top: 15px; padding: 15px; background: #f4f6f9; border-left: 3px solid #17375e; text-align: left; line-height: 1.6; font-size: 13px; }
+        .source-box { margin-top: 10px; padding: 12px; background: #ffffff; border: 1px solid #dee2e6; text-align: left; font-size: 12px; color: #495057; line-height: 1.5; }
+        .source-title { font-weight: bold; color: #17375e; margin-bottom: 4px; }
+    </style>
+</head>
+<body>
+
+<div class="container">
+    <h2 style="margin-top: 0; color: #17375e; font-size: 20px; font-weight: bold;">軌道幾何線形與工作點 (WP) 分步建構示意</h2>
+    
+    <div class="phase-indicator">
+        <div id="light-phase-1" class="phase-box">階段一：直線定位</div>
+        <div id="light-phase-2" class="phase-box">階段二：曲線段施加超高</div>
+        <div id="light-phase-3" class="phase-box">階段三：平移對心</div>
+    </div>
+
+    <div class="controls">
+        <button onclick="setPhase(0)">跳至階段一</button>
+        <button onclick="setPhase(66)">跳至階段二完成</button>
+        <button onclick="setPhase(100)">跳至階段三完成</button>
+    </div>
+
+    <div class="slider-group">
+        <div>
+            <span style="font-size: 13px; color: #495057;">幾何建構進度：</span>
+            <input type="range" id="progress-slider" min="0" max="100" value="0" oninput="drawAll()">
+            <span id="progress-value" style="font-family: Consolas, monospace; font-size: 14px; color: #17375e;">0%</span>
+        </div>
+    </div>
+
+    <canvas id="trackCanvas"></canvas>
+
+    <div class="info-box" id="info-text">讀取中...</div>
+
+    <div class="source-box">
+        <div class="source-title">■ 規範設計依據來源：</div>
+        《中運量鋼輪系統之軌道線形設計準則 (2019年12月版)》第 2.1.5 節「(4) 軌道線形之建立」：<br>
+        A. 兩鋼軌間之軌距為 1435mm，量測位置在鋼軌踏面 (T/R) 下 14mm 處。<br>
+        B. 直線軌道之線形係依據軌道中心線，維持兩鋼軌內側等距。<br>
+        C. 曲線軌道之線形係依據軌道中心線，先維持縱斷面坡度線高程，再向內量取 717.5mm 作為低軌 (內軌) 位置，至於軌距 1435mm 須在兩鋼軌所在平面上量測 (含超高度之影響)，以定出高軌 (外軌) 位置，保持兩鋼軌的相對位置後，平移軌道至軌距中心垂線與軌道中心重疊。
+    </div>
+</div>
+
+<script>
+    const canvas = document.getElementById('trackCanvas');
+    const ctx = canvas.getContext('2d');
+
+    const logicalWidth = 840;
+    const logicalHeight = 440;
+    // 強制套用最低 3 倍之超級採樣 (Supersampling)，大幅提升渲染解析度
+    const dpr = Math.max(window.devicePixelRatio || 1, 3);
+    
+    canvas.style.width = logicalWidth + 'px';
+    canvas.style.height = logicalHeight + 'px';
+    canvas.width = logicalWidth * dpr;
+    canvas.height = logicalHeight * dpr;
+    ctx.scale(dpr, dpr);
+
+    // 開啟影像平滑處理以優化曲線邊緣
+    ctx.imageSmoothingEnabled = true;
+
+    const scale = 0.28; 
+    const gauge = 1435; 
+    const halfGauge = gauge / 2; 
+    const maxAngleDeg = 15; 
+    const oX = logicalWidth / 2 + 30; 
+    const oY = 320; 
+
+    function setPhase(value) {
+        document.getElementById('progress-slider').value = value;
+        drawAll();
+    }
+
+    function drawGrid() {
+        ctx.save();
+        ctx.strokeStyle = '#f1f3f5';
+        ctx.lineWidth = 1;
+        const gridSize = 20;
+        for (let x = 0; x <= logicalWidth; x += gridSize) {
+            ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, logicalHeight); ctx.stroke();
+        }
+        for (let y = 0; y <= logicalHeight; y += gridSize) {
+            ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(logicalWidth, y); ctx.stroke();
+        }
+        ctx.restore();
+    }
+
+    function drawDetailedRail(x, y, rad) {
+        ctx.save();
+        ctx.translate(x, y);
+        ctx.rotate(rad);
+        
+        ctx.beginPath();
+        ctx.moveTo(-12, -10);
+        ctx.quadraticCurveTo(0, -12, 12, -10);
+        ctx.lineTo(15, -4);
+        ctx.lineTo(13, 2);
+        ctx.lineTo(5, 4);
+        ctx.lineTo(4, 25);
+        ctx.lineTo(25, 36);
+        ctx.lineTo(25, 40);
+        ctx.lineTo(-25, 40);
+        ctx.lineTo(-25, 36);
+        ctx.lineTo(-4, 25);
+        ctx.lineTo(-5, 4);
+        ctx.lineTo(-13, 2);
+        ctx.lineTo(-15, -4);
+        ctx.closePath();
+
+        ctx.fillStyle = '#6c757d';
+        ctx.fill();
+        ctx.strokeStyle = '#212529';
+        ctx.lineWidth = 1.2;
+        ctx.stroke();
+        
+        ctx.restore();
+    }
+
+    function drawPrecisionWP(x, y) {
+        ctx.save();
+        ctx.beginPath();
+        ctx.arc(x, y, 6, 0, 2 * Math.PI);
+        ctx.strokeStyle = '#c0392b';
+        ctx.lineWidth = 1.5;
+        ctx.stroke();
+
+        ctx.beginPath();
+        ctx.moveTo(x - 10, y); ctx.lineTo(x + 10, y);
+        ctx.moveTo(x, y - 10); ctx.lineTo(x, y + 10);
+        ctx.strokeStyle = '#c0392b';
+        ctx.lineWidth = 1.2;
+        ctx.stroke();
+        
+        ctx.beginPath();
+        ctx.arc(x, y, 1.5, 0, 2 * Math.PI);
+        ctx.fillStyle = '#c0392b';
+        ctx.fill();
+        ctx.restore();
+    }
+
+    function drawPrecisionGC(x, y) {
+        ctx.save();
+        ctx.beginPath();
+        ctx.arc(x, y, 8, 0, 2 * Math.PI);
+        ctx.strokeStyle = '#093d62';
+        ctx.lineWidth = 1.5;
+        ctx.stroke();
+
+        ctx.beginPath();
+        ctx.arc(x, y, 4, 0, 2 * Math.PI);
+        ctx.strokeStyle = '#093d62';
+        ctx.lineWidth = 1.2;
+        ctx.stroke();
+
+        ctx.beginPath();
+        ctx.moveTo(x - 12, y); ctx.lineTo(x + 12, y);
+        ctx.moveTo(x, y - 12); ctx.lineTo(x, y + 12);
+        ctx.strokeStyle = '#093d62';
+        ctx.lineWidth = 1.2;
+        ctx.stroke();
+        ctx.restore();
+    }
+
+    function drawArrowLine(x1, y1, x2, y2) {
+        ctx.beginPath();
+        ctx.moveTo(x1, y1);
+        ctx.lineTo(x2, y2);
+        ctx.strokeStyle = '#495057';
+        ctx.lineWidth = 1.0;
+        ctx.stroke();
+
+        const headlen = 6;
+        const angle = Math.atan2(y2 - y1, x2 - x1);
+        
+        ctx.beginPath();
+        ctx.moveTo(x2, y2);
+        ctx.lineTo(x2 - headlen * Math.cos(angle - Math.PI/6), y2 - headlen * Math.sin(angle - Math.PI/6));
+        ctx.lineTo(x2 - headlen * Math.cos(angle + Math.PI/6), y2 - headlen * Math.sin(angle + Math.PI/6));
+        ctx.fillStyle = '#495057';
+        ctx.fill();
+    }
+
+    function drawAll() {
+        ctx.clearRect(0, 0, logicalWidth, logicalHeight);
+        drawGrid(); 
+        
+        const progress = parseInt(document.getElementById('progress-slider').value);
+        document.getElementById('progress-value').innerText = progress + "%";
+        
+        let currentAngleDeg = 0;
+        let currentShift_mm = 0;
+        let infoHtml = "";
+        let activePhase = 1;
+
+        if (progress <= 33) {
+            activePhase = 1;
+            currentAngleDeg = 0;
+            currentShift_mm = 0;
+            infoHtml = "<strong>【階段一：直線段】</strong>直線軌道之線形係依據軌道中心線，維持兩鋼軌內側等距。兩鋼軌踏面等高，軌距中心 (GC) 垂線與軌道中心線 (CL) 重疊。";
+        } 
+        else if (progress <= 66) {
+            activePhase = 2;
+            const phaseProgress = (progress - 33) / 33;
+            currentAngleDeg = maxAngleDeg * phaseProgress;
+            currentShift_mm = 0;
+            infoHtml = "<strong>【階段二：曲線段施加超高】</strong>依規範先維持縱斷面坡度線高程，向內量取717.5mm定位低軌。沿傾斜平面向外量測1435mm以定出高軌。此時<b>軌距中心垂線因旋轉產生偏離，未與軌道中心線重疊</b>。";
+        } 
+        else {
+            activePhase = 3;
+            currentAngleDeg = maxAngleDeg;
+            const phaseProgress = (progress - 66) / 34;
+            const radMax = -maxAngleDeg * Math.PI / 180;
+            const targetShift_mm = halfGauge * (1 - Math.cos(radMax));
+            currentShift_mm = targetShift_mm * phaseProgress;
+            infoHtml = "<strong>【階段三：平移對心】</strong>保持兩鋼軌之相對位置不變，將整體軌道平移至<b>軌距中心垂線與軌道中心重疊</b>。此動作在曲線段完成最終軌道幾何定位。";
+        }
+
+        document.getElementById('light-phase-1').className = 'phase-box' + (activePhase === 1 ? ' active' : '');
+        document.getElementById('light-phase-2').className = 'phase-box' + (activePhase === 2 ? ' active' : '');
+        document.getElementById('light-phase-3').className = 'phase-box' + (activePhase === 3 ? ' active' : '');
+        document.getElementById('info-text').innerHTML = infoHtml;
+
+        const rad = -currentAngleDeg * Math.PI / 180; 
+
+        const ir_x_mm = -halfGauge + currentShift_mm;
+        const ir_y_mm = 0; 
+        
+        const or_x_mm = ir_x_mm + gauge * Math.cos(rad);
+        const or_y_mm = ir_y_mm + gauge * Math.sin(rad);
+
+        const gc_x_mm = (ir_x_mm + or_x_mm) / 2;
+        const gc_y_mm = (ir_y_mm + or_y_mm) / 2;
+
+        const px_ir_x = oX + (ir_x_mm * scale);
+        const px_ir_y = oY + (ir_y_mm * scale);
+        const px_or_x = oX + (or_x_mm * scale);
+        const px_or_y = oY + (or_y_mm * scale);
+        const px_gc_x = oX + (gc_x_mm * scale);
+        const px_gc_y = oY + (gc_y_mm * scale);
+        const px_wp_x = oX; 
+        const px_wp_y = oY; 
+
+        // 1. 水平高程 0 基準線
+        ctx.beginPath();
+        ctx.strokeStyle = '#ced4da';
+        ctx.lineWidth = 1.2;
+        ctx.moveTo(0, oY);
+        ctx.lineTo(logicalWidth, oY);
+        ctx.stroke();
+
+        // 2. 軌道中心線 (CL)
+        ctx.beginPath();
+        ctx.strokeStyle = '#c0392b';
+        ctx.lineWidth = 1.5;
+        ctx.setLineDash([12, 4, 3, 4]);
+        ctx.moveTo(oX, 60);
+        ctx.lineTo(oX, 390);
+        ctx.stroke();
+        ctx.setLineDash([]);
+        ctx.fillStyle = '#c0392b';
+        ctx.font = 'bold 13px Arial';
+        ctx.fillText("軌道中心線 (CL)", oX - 45, 50);
+
+        // 3. 軌距中心垂線
+        ctx.beginPath();
+        ctx.strokeStyle = '#093d62'; 
+        ctx.lineWidth = 2.0;
+        ctx.setLineDash([8, 6]);
+        ctx.moveTo(px_gc_x, 110);
+        ctx.lineTo(px_gc_x, px_gc_y);
+        ctx.stroke();
+        ctx.setLineDash([]);
+
+        // 4. 低軌高程水平虛線
+        ctx.beginPath();
+        ctx.strokeStyle = '#3498db';
+        ctx.lineWidth = 1.5;
+        ctx.setLineDash([4, 4]);
+        ctx.moveTo(px_ir_x - 50, oY - 10);
+        ctx.lineTo(oX + 30, oY - 10);
+        ctx.stroke();
+        ctx.setLineDash([]);
+
+        // 5. 鋼軌踏面連線
+        ctx.beginPath();
+        ctx.strokeStyle = '#495057';
+        ctx.lineWidth = 1.5;
+        ctx.moveTo(px_ir_x, px_ir_y - 10);
+        ctx.lineTo(px_or_x, px_or_y - 10);
+        ctx.stroke();
+
+        // 6. 鋼軌
+        drawDetailedRail(px_ir_x, px_ir_y, rad);
+        drawDetailedRail(px_or_x, px_or_y, rad);
+
+        // 7. WP 標記
+        drawPrecisionWP(px_wp_x, px_wp_y - 10);
+        ctx.fillStyle = '#c0392b';
+        ctx.font = 'bold 13px Arial';
+        ctx.fillText("WP", px_wp_x + 12, px_wp_y - 14);
+        ctx.font = '11px "Microsoft JhengHei"';
+        ctx.fillStyle = '#495057';
+        ctx.fillText("Working Point", px_wp_x + 12, px_wp_y - 2);
+
+        // 8. GC 標記
+        drawPrecisionGC(px_gc_x, px_gc_y - 10);
+        ctx.fillStyle = '#093d62';
+        ctx.font = 'bold 13px Arial';
+        ctx.fillText("GC", px_gc_x - 24, px_gc_y - 14);
+        ctx.font = 'bold 12px "Microsoft JhengHei"';
+        ctx.fillStyle = '#093d62';
+        ctx.fillText("軌距中心垂線", px_gc_x - 38, 100);
+
+        // 內外軌文字
+        ctx.fillStyle = '#343a40';
+        ctx.font = 'bold 12px "Microsoft JhengHei"';
+        ctx.fillText("低軌 (內軌)", px_ir_x - 28, px_ir_y + 60);
+        ctx.fillText("高軌 (外軌)", px_or_x - 28, px_or_y + 60);
+
+        // 9. 傾斜軌距動態標註
+        ctx.save();
+        ctx.translate(px_ir_x, px_ir_y - 10);
+        ctx.rotate(rad);
+
+        const pxHalfGauge = halfGauge * scale;
+        const pxFullGauge = gauge * scale;
+        const yOffset = -50; 
+
+        // 尺寸界線
+        ctx.beginPath();
+        ctx.strokeStyle = '#adb5bd';
+        ctx.lineWidth = 1.0;
+        ctx.moveTo(0, -20); ctx.lineTo(0, yOffset - 10);
+        ctx.moveTo(pxHalfGauge, -20); ctx.lineTo(pxHalfGauge, yOffset - 10);
+        ctx.moveTo(pxFullGauge, -20); ctx.lineTo(pxFullGauge, yOffset - 10);
+        ctx.stroke();
+
+        // 雙向箭頭
+        drawArrowLine(0, yOffset, pxHalfGauge, yOffset);
+        drawArrowLine(pxHalfGauge, yOffset, 0, yOffset);
+        drawArrowLine(pxHalfGauge, yOffset, pxFullGauge, yOffset);
+        drawArrowLine(pxFullGauge, yOffset, pxHalfGauge, yOffset);
+
+        // 標註文字
+        ctx.fillStyle = '#343a40';
+        ctx.font = 'bold 12px Consolas, Arial';
+        ctx.textAlign = 'center';
+        ctx.fillText("717.5mm", pxHalfGauge / 2, yOffset - 8);
+        ctx.fillText("717.5mm", pxHalfGauge + pxHalfGauge / 2, yOffset - 8);
+        
+        ctx.font = '11px "Microsoft JhengHei"';
+        ctx.fillStyle = '#6c757d';
+        ctx.fillText("軌距測量平面 (沿鋼軌踏面)", pxFullGauge / 2, yOffset - 22);
+
+        ctx.restore();
+    }
+
+    drawAll();
+</script>
+
+</body>
+</html>
